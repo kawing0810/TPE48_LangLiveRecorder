@@ -1,0 +1,27 @@
+# Python cache
+__pycache__/
+*.pyc
+
+# Local runtime state
+data/*.json
+dashboard_state.json
+active_recordings.json
+recording_history.json
+.liveimg_cache.json
+
+# Media outputs
+*.ts
+*.mkv
+*.mp4
+*.flv
+*.mov
+
+# Generated assets and logs
+avatar_cache/
+liveimg/
+ffmpeg-*.log
+ffmpeg.exe
+
+# OS/editor noise
+Thumbs.db
+Desktop.ini

@@ -289,7 +289,7 @@ def render_html(message=""):
 <body>
   <div class="container">
   <div class="header">
-    <h2>TPE48 LangLiveRecorder 監控儀表板 <span class="pill">每 10 秒自動更新</span></h2>
+    <h2>TTP 直播錄影監控儀表板 <span class="pill">每 10 秒自動更新</span></h2>
     <div class="muted">頁面更新時間：{now}</div>
   </div>
   {message_html}

@@ -19,7 +19,6 @@ except Exception:
 
 CURRENT_PATH = os.path.dirname(os.path.abspath(__file__))
 MEMBERS_FILE = os.path.join(CURRENT_PATH, "members.json")
-CONFIG_FILE = os.path.join(CURRENT_PATH, "config.json")
 DATA_DIR = os.path.join(CURRENT_PATH, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 CHECKER_STATE_FILE = os.path.join(DATA_DIR, "dashboard_state.json")
@@ -36,15 +35,6 @@ def load_json(path, default):
             return json.load(f)
     except Exception:
         return default
-
-
-def save_json(path, data):
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        return True
-    except Exception:
-        return False
 
 
 def setup_dpi_awareness():
@@ -92,7 +82,7 @@ def setup_tk_scaling(root):
 class RecorderGui:
     def __init__(self, root):
         self.root = root
-        self.root.title("TPE48 LangLiveRecorder Alpha 4")
+        self.root.title("TTP 錄影控制台 Alpha 4")
         self.root.geometry("1320x780")
         self.root.minsize(1120, 650)
 
@@ -112,25 +102,9 @@ class RecorderGui:
         self.last_members_signature = None
         self.last_active_signature = None
         self.last_history_signature = None
-        self.config_data = load_json(CONFIG_FILE, {})
-
-        self.cfg_stall_seconds = tk.StringVar(value="")
-        self.cfg_max_stall_restarts = tk.StringVar(value="")
-        self.cfg_stall_check_after = tk.StringVar(value="")
-        self.cfg_min_segment_seconds = tk.StringVar(value="")
-        self.cfg_fast_retry_limit = tk.StringVar(value="")
-        self.cfg_fast_retry_delay = tk.StringVar(value="")
-        self.cfg_backoff_base = tk.StringVar(value="")
-        self.cfg_backoff_max = tk.StringVar(value="")
-        self.cfg_gate_days = tk.StringVar(value="")
-        self.cfg_gate_min_records = tk.StringVar(value="")
-        self.cfg_gate_min_success_rate = tk.StringVar(value="")
-        self.cfg_gate_max_avg_restarts = tk.StringVar(value="")
-        self.cfg_gate_max_short_ratio = tk.StringVar(value="")
 
         self.setup_theme()
         self.build_ui()
-        self.load_settings_to_form()
         self.refresh_all()
 
     def setup_theme(self):
@@ -175,7 +149,7 @@ class RecorderGui:
         top = ttk.Frame(self.root, padding=(10, 8))
         top.pack(fill=tk.X)
 
-        ttk.Label(top, text="TPE48 LangLiveRecorder", style="Header.TLabel").pack(side=tk.LEFT)
+        ttk.Label(top, text="TTP 錄影控制台", style="Header.TLabel").pack(side=tk.LEFT)
         ttk.Label(top, text="  桌面版 MVP", style="Sub.TLabel").pack(side=tk.LEFT, pady=(4, 0))
 
         toolbar = ttk.Frame(self.root, padding=(10, 0, 10, 6))
@@ -219,18 +193,15 @@ class RecorderGui:
         self.tab_members = ttk.Frame(notebook)
         self.tab_active = ttk.Frame(notebook)
         self.tab_history = ttk.Frame(notebook)
-        self.tab_settings = ttk.Frame(notebook)
         notebook.add(self.tab_cards, text="卡片牆")
         notebook.add(self.tab_members, text="成員與開播狀態")
         notebook.add(self.tab_active, text="錄影中")
         notebook.add(self.tab_history, text="錄影歷史")
-        notebook.add(self.tab_settings, text="設定")
 
         self.build_cards_tab()
         self.build_members_tab()
         self.build_active_tab()
         self.build_history_tab()
-        self.build_settings_tab()
 
         status_bar = ttk.Frame(self.root, padding=(8, 4))
         status_bar.pack(fill=tk.X, side=tk.BOTTOM)
@@ -446,94 +417,6 @@ class RecorderGui:
         self.history_tree.column("reason", width=280)
         self.history_tree.column("elapsed", width=90, anchor=tk.CENTER)
         self.history_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-
-    def build_settings_tab(self):
-        wrap = ttk.Frame(self.tab_settings, padding=10)
-        wrap.pack(fill=tk.BOTH, expand=True)
-
-        title = ttk.Frame(wrap)
-        title.pack(fill=tk.X, pady=(0, 8))
-        ttk.Label(title, text="設定頁（config.json）", style="Header.TLabel").pack(side=tk.LEFT)
-        ttk.Button(title, text="重載設定", command=self.reload_settings_from_disk).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(title, text="儲存設定", command=self.save_settings_to_disk).pack(side=tk.RIGHT, padx=4)
-
-        recorder_box = ttk.LabelFrame(wrap, text="Recorder 參數", padding=10)
-        recorder_box.pack(fill=tk.X, pady=(0, 10))
-        self.add_setting_row(recorder_box, 0, "stall_seconds", self.cfg_stall_seconds)
-        self.add_setting_row(recorder_box, 1, "max_stall_restarts", self.cfg_max_stall_restarts)
-        self.add_setting_row(recorder_box, 2, "stall_check_after_seconds", self.cfg_stall_check_after)
-        self.add_setting_row(recorder_box, 3, "min_segment_seconds", self.cfg_min_segment_seconds)
-        self.add_setting_row(recorder_box, 4, "fast_retry_limit", self.cfg_fast_retry_limit)
-        self.add_setting_row(recorder_box, 5, "fast_retry_delay_seconds", self.cfg_fast_retry_delay)
-        self.add_setting_row(recorder_box, 6, "backoff_base_seconds", self.cfg_backoff_base)
-        self.add_setting_row(recorder_box, 7, "backoff_max_seconds", self.cfg_backoff_max)
-
-        gate_box = ttk.LabelFrame(wrap, text="Alpha 5 Gate 參數", padding=10)
-        gate_box.pack(fill=tk.X)
-        self.add_setting_row(gate_box, 0, "days", self.cfg_gate_days)
-        self.add_setting_row(gate_box, 1, "min_records", self.cfg_gate_min_records)
-        self.add_setting_row(gate_box, 2, "min_success_rate", self.cfg_gate_min_success_rate)
-        self.add_setting_row(gate_box, 3, "max_avg_restarts", self.cfg_gate_max_avg_restarts)
-        self.add_setting_row(gate_box, 4, "max_short_ratio", self.cfg_gate_max_short_ratio)
-
-    def add_setting_row(self, parent, row_idx, label_text, var):
-        ttk.Label(parent, text=label_text).grid(row=row_idx, column=0, sticky="w", padx=(0, 10), pady=4)
-        ttk.Entry(parent, textvariable=var, width=24).grid(row=row_idx, column=1, sticky="w", pady=4)
-
-    def load_settings_to_form(self):
-        recorder = self.config_data.get("recorder", {})
-        gate = self.config_data.get("alpha5_gate", {})
-        self.cfg_stall_seconds.set(str(recorder.get("stall_seconds", 20)))
-        self.cfg_max_stall_restarts.set(str(recorder.get("max_stall_restarts", 20)))
-        self.cfg_stall_check_after.set(str(recorder.get("stall_check_after_seconds", 30)))
-        self.cfg_min_segment_seconds.set(str(recorder.get("min_segment_seconds", 120)))
-        self.cfg_fast_retry_limit.set(str(recorder.get("fast_retry_limit", 3)))
-        self.cfg_fast_retry_delay.set(str(recorder.get("fast_retry_delay_seconds", 2)))
-        self.cfg_backoff_base.set(str(recorder.get("backoff_base_seconds", 5)))
-        self.cfg_backoff_max.set(str(recorder.get("backoff_max_seconds", 60)))
-
-        self.cfg_gate_days.set(str(gate.get("days", 3)))
-        self.cfg_gate_min_records.set(str(gate.get("min_records", 30)))
-        self.cfg_gate_min_success_rate.set(str(gate.get("min_success_rate", 0.9)))
-        self.cfg_gate_max_avg_restarts.set(str(gate.get("max_avg_restarts", 1.2)))
-        self.cfg_gate_max_short_ratio.set(str(gate.get("max_short_ratio", 0.35)))
-
-    def reload_settings_from_disk(self):
-        self.config_data = load_json(CONFIG_FILE, {})
-        self.load_settings_to_form()
-        self.status_var.set("設定已從磁碟重載")
-
-    def save_settings_to_disk(self):
-        try:
-            new_config = {
-                "recorder": {
-                    "stall_seconds": int(self.cfg_stall_seconds.get()),
-                    "max_stall_restarts": int(self.cfg_max_stall_restarts.get()),
-                    "stall_check_after_seconds": int(self.cfg_stall_check_after.get()),
-                    "min_segment_seconds": int(self.cfg_min_segment_seconds.get()),
-                    "fast_retry_limit": int(self.cfg_fast_retry_limit.get()),
-                    "fast_retry_delay_seconds": int(self.cfg_fast_retry_delay.get()),
-                    "backoff_base_seconds": int(self.cfg_backoff_base.get()),
-                    "backoff_max_seconds": int(self.cfg_backoff_max.get())
-                },
-                "alpha5_gate": {
-                    "days": int(self.cfg_gate_days.get()),
-                    "min_records": int(self.cfg_gate_min_records.get()),
-                    "min_success_rate": float(self.cfg_gate_min_success_rate.get()),
-                    "max_avg_restarts": float(self.cfg_gate_max_avg_restarts.get()),
-                    "max_short_ratio": float(self.cfg_gate_max_short_ratio.get())
-                }
-            }
-        except ValueError:
-            messagebox.showerror("錯誤", "設定格式錯誤，請確認數值欄位。")
-            return
-
-        ok = save_json(CONFIG_FILE, new_config)
-        if not ok:
-            messagebox.showerror("錯誤", "寫入 config.json 失敗")
-            return
-        self.config_data = new_config
-        self.status_var.set("設定已儲存到 config.json")
 
     def start_checker(self):
         try:

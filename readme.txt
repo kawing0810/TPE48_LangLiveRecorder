@@ -1,4 +1,4 @@
-TTP Lang Live Recorder - Alpha 4
+TPE48 LangLiveRecorder - Alpha 4
 ======================================
 
 專案說明
@@ -17,6 +17,16 @@ TTP Lang Live Recorder - Alpha 4
 - Windows
 - Python 3
 - ffmpeg / ffprobe（建議放在專案根目錄，或可由系統 PATH 直接執行）
+
+可調整設定
+--------------------------------------
+- 設定檔：`config.json`
+- 主要可調欄位：
+  - `recorder.stall_seconds`：卡住秒數門檻
+  - `recorder.stall_check_after_seconds`：開錄後多久開始判定卡住
+  - `recorder.max_stall_restarts`：最大重啟次數
+  - `recorder.min_segment_seconds`：最小分段秒數（避免碎檔）
+  - `alpha5_gate.*`：Alpha 5 升版驗收門檻
 
 
 啟動方式
@@ -40,6 +50,7 @@ http://127.0.0.1:8787
 
 6) 啟動 Tkinter 視窗控制台
 > tkinter_dashboard.bat
+  - 可在「設定」分頁直接調整 config.json
 
 
 Watchdog（Windows 排程）
@@ -82,6 +93,15 @@ Alpha 4 新增重點
 - 新增 Alpha 5 升版驗收腳本：
   > python alpha5_gate.py
   （預設檢查最近 3 天：成功率、平均重啟次數、短片段比例）
+
+CI / Release（GitHub Actions）
+--------------------------------------
+- Python CI:
+  - .github/workflows/python-ci.yml
+  - push / pull_request 自動執行語法檢查與 smoke test
+- Release:
+  - .github/workflows/release.yml
+  - push tag（v*）後自動打包並建立 GitHub Release
 
 
 舊版本紀錄

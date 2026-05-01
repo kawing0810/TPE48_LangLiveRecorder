@@ -28,6 +28,7 @@ COVER_CACHE_FILE = os.path.join(DATA_DIR, "liveimg_cache.json")
 COVER_DIR = os.path.join(current_path, "liveimg")
 ACTIVE_RECORDINGS_FILE = os.path.join(DATA_DIR, "active_recordings.json")
 RECORDING_HISTORY_FILE = os.path.join(DATA_DIR, "recording_history.json")
+CONFIG_FILE = os.path.join(current_path, "config.json")
 STALL_SECONDS = 20
 MAX_STALL_RESTARTS = 20
 STALL_CHECK_AFTER_SECONDS = 30
@@ -51,6 +52,38 @@ args = parser.parse_args()
 
 langlive_id = args.uid
 label = args.label
+
+
+def loadConfig():
+    default_cfg = {}
+    if not os.path.exists(CONFIG_FILE):
+        return default_cfg
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default_cfg
+
+
+def applyRecorderConfig():
+    global STALL_SECONDS
+    global MAX_STALL_RESTARTS
+    global STALL_CHECK_AFTER_SECONDS
+    global MIN_SEGMENT_SECONDS
+    global FAST_RETRY_LIMIT
+    global FAST_RETRY_DELAY_SECONDS
+    global BACKOFF_BASE_SECONDS
+    global BACKOFF_MAX_SECONDS
+
+    cfg = loadConfig().get("recorder", {})
+    STALL_SECONDS = int(cfg.get("stall_seconds", STALL_SECONDS))
+    MAX_STALL_RESTARTS = int(cfg.get("max_stall_restarts", MAX_STALL_RESTARTS))
+    STALL_CHECK_AFTER_SECONDS = int(cfg.get("stall_check_after_seconds", STALL_CHECK_AFTER_SECONDS))
+    MIN_SEGMENT_SECONDS = int(cfg.get("min_segment_seconds", MIN_SEGMENT_SECONDS))
+    FAST_RETRY_LIMIT = int(cfg.get("fast_retry_limit", FAST_RETRY_LIMIT))
+    FAST_RETRY_DELAY_SECONDS = int(cfg.get("fast_retry_delay_seconds", FAST_RETRY_DELAY_SECONDS))
+    BACKOFF_BASE_SECONDS = int(cfg.get("backoff_base_seconds", BACKOFF_BASE_SECONDS))
+    BACKOFF_MAX_SECONDS = int(cfg.get("backoff_max_seconds", BACKOFF_MAX_SECONDS))
 
 def doLiveRecording(live_url, output_file):
     tstart = time.time()
@@ -339,6 +372,7 @@ ctypes.windll.kernel32.SetConsoleTitleW("TTP %s" % langlive_id)
 oRecorder = ttpLangLiveRecorder()
 
 oRecorder.quickedit(0)
+applyRecorderConfig()
 
 live_url, session_id, nickname, avatar_url, liveimg_url = oRecorder.getLiveInfo(langlive_id)
 

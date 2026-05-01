@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 CURRENT_PATH = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(CURRENT_PATH, "data")
 HISTORY_FILE = os.path.join(DATA_DIR, "recording_history.json")
+CONFIG_FILE = os.path.join(CURRENT_PATH, "config.json")
 
 
 def load_history():
@@ -20,6 +21,17 @@ def load_history():
             return json.load(f)
     except Exception:
         return []
+
+
+def load_gate_config():
+    if not os.path.exists(CONFIG_FILE):
+        return {}
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg.get("alpha5_gate", {})
+    except Exception:
+        return {}
 
 
 def parse_iso(value):
@@ -51,7 +63,9 @@ def evaluate(records, days, min_records, min_success_rate, max_avg_restarts):
     pass_total = total >= min_records
     pass_success = success_rate >= min_success_rate
     pass_restart = avg_restarts <= max_avg_restarts
-    pass_short = short_ratio <= 0.35
+    gate_cfg = load_gate_config()
+    max_short_ratio = float(gate_cfg.get("max_short_ratio", 0.35))
+    pass_short = short_ratio <= max_short_ratio
 
     is_pass = pass_total and pass_success and pass_restart and pass_short
     return {
@@ -66,16 +80,18 @@ def evaluate(records, days, min_records, min_success_rate, max_avg_restarts):
         "pass_success": pass_success,
         "pass_restart": pass_restart,
         "pass_short": pass_short,
+        "max_short_ratio": max_short_ratio,
         "is_pass": is_pass,
     }
 
 
 def main():
     parser = argparse.ArgumentParser(description="Alpha 5 gate validator")
-    parser.add_argument("--days", type=int, default=3, help="lookback days")
-    parser.add_argument("--min-records", type=int, default=30, help="minimum records in window")
-    parser.add_argument("--min-success-rate", type=float, default=0.90, help="minimum success rate")
-    parser.add_argument("--max-avg-restarts", type=float, default=1.20, help="maximum average restart count")
+    gate_cfg = load_gate_config()
+    parser.add_argument("--days", type=int, default=int(gate_cfg.get("days", 3)), help="lookback days")
+    parser.add_argument("--min-records", type=int, default=int(gate_cfg.get("min_records", 30)), help="minimum records in window")
+    parser.add_argument("--min-success-rate", type=float, default=float(gate_cfg.get("min_success_rate", 0.90)), help="minimum success rate")
+    parser.add_argument("--max-avg-restarts", type=float, default=float(gate_cfg.get("max_avg_restarts", 1.20)), help="maximum average restart count")
     args = parser.parse_args()
 
     records = load_history()
@@ -97,7 +113,7 @@ def main():
     print("Records >= threshold: {0}".format("PASS" if result["pass_total"] else "FAIL"))
     print("Success rate >= threshold: {0}".format("PASS" if result["pass_success"] else "FAIL"))
     print("Avg restarts <= threshold: {0}".format("PASS" if result["pass_restart"] else "FAIL"))
-    print("Short segment ratio <= 35%: {0}".format("PASS" if result["pass_short"] else "FAIL"))
+    print("Short segment ratio <= {0:.0%}: {1}".format(result["max_short_ratio"], "PASS" if result["pass_short"] else "FAIL"))
     print("=== Gate Result: {0} ===".format("PASS" if result["is_pass"] else "FAIL"))
 
     # Exit code for CI usage

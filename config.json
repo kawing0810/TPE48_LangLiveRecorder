@@ -1,0 +1,19 @@
+{
+  "recorder": {
+    "stall_seconds": 20,
+    "max_stall_restarts": 20,
+    "stall_check_after_seconds": 30,
+    "min_segment_seconds": 120,
+    "fast_retry_limit": 3,
+    "fast_retry_delay_seconds": 2,
+    "backoff_base_seconds": 5,
+    "backoff_max_seconds": 60
+  },
+  "alpha5_gate": {
+    "days": 3,
+    "min_records": 30,
+    "min_success_rate": 0.9,
+    "max_avg_restarts": 1.2,
+    "max_short_ratio": 0.35
+  }
+}

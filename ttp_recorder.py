@@ -14,10 +14,17 @@ import subprocess
 import argparse
 import ctypes
 import re
+import hashlib
 from urllib.parse import urlparse
 
 
 from ttp_langLiveRecorder import ttpLangLiveRecorder
+from recorder_core import (
+    classify_failure_reason,
+    get_retry_delay_seconds,
+    normalize_recorder_config,
+    should_rotate_segment,
+)
 
 sys.stdout.reconfigure(encoding='utf-8')
 
@@ -75,15 +82,15 @@ def applyRecorderConfig():
     global BACKOFF_BASE_SECONDS
     global BACKOFF_MAX_SECONDS
 
-    cfg = loadConfig().get("recorder", {})
-    STALL_SECONDS = int(cfg.get("stall_seconds", STALL_SECONDS))
-    MAX_STALL_RESTARTS = int(cfg.get("max_stall_restarts", MAX_STALL_RESTARTS))
-    STALL_CHECK_AFTER_SECONDS = int(cfg.get("stall_check_after_seconds", STALL_CHECK_AFTER_SECONDS))
-    MIN_SEGMENT_SECONDS = int(cfg.get("min_segment_seconds", MIN_SEGMENT_SECONDS))
-    FAST_RETRY_LIMIT = int(cfg.get("fast_retry_limit", FAST_RETRY_LIMIT))
-    FAST_RETRY_DELAY_SECONDS = int(cfg.get("fast_retry_delay_seconds", FAST_RETRY_DELAY_SECONDS))
-    BACKOFF_BASE_SECONDS = int(cfg.get("backoff_base_seconds", BACKOFF_BASE_SECONDS))
-    BACKOFF_MAX_SECONDS = int(cfg.get("backoff_max_seconds", BACKOFF_MAX_SECONDS))
+    cfg = normalize_recorder_config(loadConfig().get("recorder", {}))
+    STALL_SECONDS = cfg["stall_seconds"]
+    MAX_STALL_RESTARTS = cfg["max_stall_restarts"]
+    STALL_CHECK_AFTER_SECONDS = cfg["stall_check_after_seconds"]
+    MIN_SEGMENT_SECONDS = cfg["min_segment_seconds"]
+    FAST_RETRY_LIMIT = cfg["fast_retry_limit"]
+    FAST_RETRY_DELAY_SECONDS = cfg["fast_retry_delay_seconds"]
+    BACKOFF_BASE_SECONDS = cfg["backoff_base_seconds"]
+    BACKOFF_MAX_SECONDS = cfg["backoff_max_seconds"]
 
 def doLiveRecording(live_url, output_file):
     tstart = time.time()
@@ -148,34 +155,6 @@ def doLiveRecording(live_url, output_file):
     message = "END@ %s (%s) -elapsed %s" % (nickname, langlive_id, hms)
     print(message)
     return success, int(elapsed), stalled
-
-
-def classifyFailureReason(reason_text, stalled=False):
-    text = (reason_text or "").lower()
-    if stalled:
-        return "network_stall"
-    if "直播已結束" in reason_text:
-        return "live_ended"
-    if "404" in text or "not found" in text:
-        return "source_404"
-    if "開頭無音訊" in reason_text or "無音訊串流" in reason_text:
-        return "audio_start_missing"
-    if "有聲無畫" in reason_text or "缺少視訊串流" in reason_text:
-        return "video_missing"
-    if "輸出檔案過小" in reason_text or "找不到輸出檔案" in reason_text:
-        return "output_small_or_missing"
-    if "ffprobe" in reason_text:
-        return "probe_failed"
-    return "other"
-
-
-def getRetryDelaySeconds(restart_count):
-    # 前幾次快速重試，其後退避
-    if restart_count <= FAST_RETRY_LIMIT:
-        return FAST_RETRY_DELAY_SECONDS
-    backoff_step = restart_count - FAST_RETRY_LIMIT
-    delay = BACKOFF_BASE_SECONDS * (2 ** (backoff_step - 1))
-    return min(delay, BACKOFF_MAX_SECONDS)
 
 
 def hasAudioPacketsAtStart(output_file, window_seconds):
@@ -264,16 +243,29 @@ def isM3UFile(url):
 
 def loadCoverCache():
     if not os.path.exists(COVER_CACHE_FILE):
-        return {}
+        return {"url_map": {}, "hash_map": {}}
     try:
         with open(COVER_CACHE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            cache = json.load(f)
+            # Backward compatible: old cache format was {url: file}
+            if isinstance(cache, dict) and "url_map" not in cache:
+                return {"url_map": cache, "hash_map": {}}
+            if not isinstance(cache, dict):
+                return {"url_map": {}, "hash_map": {}}
+            return {
+                "url_map": cache.get("url_map", {}),
+                "hash_map": cache.get("hash_map", {})
+            }
     except Exception:
-        return {}
+        return {"url_map": {}, "hash_map": {}}
 
 
 def saveCoverCache(cache_data):
     try:
+        if not isinstance(cache_data, dict):
+            cache_data = {"url_map": {}, "hash_map": {}}
+        cache_data.setdefault("url_map", {})
+        cache_data.setdefault("hash_map", {})
         with open(COVER_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(cache_data, f, ensure_ascii=False, indent=2)
     except Exception as e:
@@ -285,10 +277,23 @@ def saveLiveCoverImage(image_url, output_file_stem):
         return
     os.makedirs(COVER_DIR, exist_ok=True)
     cache_data = loadCoverCache()
-    if image_url in cache_data:
+    url_map = cache_data.get("url_map", {})
+    hash_map = cache_data.get("hash_map", {})
+    if image_url in url_map:
         print("** skip duplicated live cover", image_url)
         return
     try:
+        response = urllib.request.urlopen(image_url, timeout=10)
+        image_data = response.read()
+        image_hash = hashlib.sha256(image_data).hexdigest()
+        if image_hash in hash_map:
+            existed_file = hash_map.get(image_hash, "")
+            url_map[image_url] = existed_file
+            cache_data["url_map"] = url_map
+            print("** skip duplicated live cover by content hash", image_url)
+            saveCoverCache(cache_data)
+            return
+
         parsed_url = urlparse(image_url)
         _, ext = os.path.splitext(parsed_url.path)
         if ext == "":
@@ -296,11 +301,12 @@ def saveLiveCoverImage(image_url, output_file_stem):
 
         image_name = os.path.basename(output_file_stem) + "_liveimg" + ext
         image_file = os.path.join(COVER_DIR, image_name)
-        response = urllib.request.urlopen(image_url, timeout=10)
-        image_data = response.read()
         with open(image_file, "wb") as f:
             f.write(image_data)
-        cache_data[image_url] = image_file
+        url_map[image_url] = image_file
+        hash_map[image_hash] = image_file
+        cache_data["url_map"] = url_map
+        cache_data["hash_map"] = hash_map
         saveCoverCache(cache_data)
         print("** saved live cover", image_file)
     except Exception as e:
@@ -421,7 +427,7 @@ if live_url != False and live_url != '':
                 final_success = True
                 break
 
-            last_failure_category = classifyFailureReason(verify_reason, stalled=stalled)
+            last_failure_category = classify_failure_reason(verify_reason, stalled=stalled)
 
             # 非卡住類型（如來源結束、輸出嚴重異常）不做循環重啟
             if not stalled:
@@ -434,7 +440,13 @@ if live_url != False and live_url != '':
                 break
 
             print("** restart attempt #%s" % restart_count)
-            retry_delay = getRetryDelaySeconds(restart_count)
+            retry_delay = get_retry_delay_seconds(
+                restart_count,
+                FAST_RETRY_LIMIT,
+                FAST_RETRY_DELAY_SECONDS,
+                BACKOFF_BASE_SECONDS,
+                BACKOFF_MAX_SECONDS,
+            )
             print("** retry delay: %ss" % retry_delay)
             time.sleep(retry_delay)
             live_url_retry, session_id_retry, nickname_retry, avatar_retry, liveimg_retry = oRecorder.getLiveInfo(langlive_id)
@@ -445,7 +457,7 @@ if live_url != False and live_url != '':
 
             live_url = getHDLiveUrl(live_url_retry)
             # 避免過早碎檔：分段太短時沿用同檔名覆蓋重試
-            if elapsed_seconds >= MIN_SEGMENT_SECONDS:
+            if should_rotate_segment(elapsed_seconds, MIN_SEGMENT_SECONDS):
                 current_output_file = oRecorder.getOutputFile(langlive_id)
             current_nickname = nickname_retry or current_nickname
             current_avatar_url = avatar_retry

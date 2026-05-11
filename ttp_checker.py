@@ -128,6 +128,18 @@ def check_onlive():
     data = json.load(f)
     f.close()
 
+    prev_last_live = {}
+    if os.path.exists(CHECKER_STATE_FILE):
+        try:
+            with open(CHECKER_STATE_FILE, "r", encoding="utf-8") as sf:
+                prev_snap = json.load(sf)
+            for pm in prev_snap.get("members", []):
+                uid_key = str(pm.get("uid", ""))
+                if uid_key:
+                    prev_last_live[uid_key] = pm.get("last_live_at") or ""
+        except Exception:
+            pass
+
     snapshot = {
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "group": member_key,
@@ -143,6 +155,11 @@ def check_onlive():
             print('** %s (%s) %s' % (langlive_id, nickname, live_url))
 
             is_live = (live_url != False and live_url != '')
+            uid_str = str(langlive_id)
+            if is_live:
+                last_live_at = datetime.now().isoformat(timespec="seconds")
+            else:
+                last_live_at = prev_last_live.get(uid_str, "")
             launched = False
             if live_url != False and live_url != '':
                 # live_url not empty, test any lock file
@@ -154,13 +171,14 @@ def check_onlive():
                         print("** recorder launch failed to start recording", langlive_id)
 
             snapshot["members"].append({
-                "uid": str(langlive_id),
+                "uid": uid_str,
                 "nickname": nickname,
                 "avatar_url": avatar_url,
                 "liveimg_url": liveimg_url,
                 "is_live": is_live,
                 "session_id": session_id,
-                "launched_recorder": launched
+                "launched_recorder": launched,
+                "last_live_at": last_live_at
             })
 
     try:

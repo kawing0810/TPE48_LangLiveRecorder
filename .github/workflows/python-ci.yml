@@ -28,8 +28,12 @@ jobs:
 
       - name: Python syntax check
         run: |
-          python -m py_compile ttp_checker.py ttp_recorder.py ttp_langLiveRecorder.py dashboard.py tkinter_dashboard.py alpha5_gate.py
+          python -m py_compile ttp_checker.py ttp_recorder.py ttp_langLiveRecorder.py dashboard.py tkinter_dashboard.py alpha5_gate.py recorder_core.py monthly_quality_report.py
 
       - name: Alpha 5 gate smoke test
         run: |
           python alpha5_gate.py --days 1 --min-records 1 --min-success-rate 0 --max-avg-restarts 999 || true
+
+      - name: Unit tests
+        run: |
+          python -m unittest discover -s tests -p "test_*.py"

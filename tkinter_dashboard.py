@@ -9,6 +9,13 @@ from tkinter import ttk, messagebox
 import urllib.request
 import ctypes
 
+from recorder_core import DEFAULT_RECORDER_CONFIG, normalize_recorder_config
+
+try:
+    import winsound
+except Exception:
+    winsound = None
+
 try:
     from PIL import Image, ImageTk, ImageDraw
 except Exception:
@@ -107,11 +114,16 @@ class RecorderGui:
         self.filter_var = tk.StringVar(value="全部")
         self.auto_refresh_var = tk.BooleanVar(value=True)
         self.refresh_seconds_var = tk.IntVar(value=8)
+        self.alert_new_live_sound_var = tk.BooleanVar(value=True)
+        self.prev_live_uids = set()
+        self._monitor_baseline_done = False
+        self.last_checker_group = ""
         self.avatar_photo_refs = {}
         self.last_cards_signature = None
         self.last_members_signature = None
         self.last_active_signature = None
         self.last_history_signature = None
+        self.last_monitor_live_signature = None
         self.config_data = load_json(CONFIG_FILE, {})
 
         self.cfg_stall_seconds = tk.StringVar(value="")
@@ -201,6 +213,7 @@ class RecorderGui:
         ttk.Label(toolbar, text="秒數").pack(side=tk.LEFT, padx=(4, 4))
         refresh_spin = ttk.Spinbox(toolbar, from_=3, to=60, textvariable=self.refresh_seconds_var, width=4)
         refresh_spin.pack(side=tk.LEFT)
+        ttk.Checkbutton(toolbar, text="新開播音效", variable=self.alert_new_live_sound_var).pack(side=tk.LEFT, padx=(10, 0))
 
         cards = ttk.Frame(self.root, padding=(10, 0, 10, 8))
         cards.pack(fill=tk.X)
@@ -215,17 +228,20 @@ class RecorderGui:
         notebook = ttk.Notebook(self.root)
         notebook.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
 
+        self.tab_monitor = ttk.Frame(notebook)
         self.tab_cards = ttk.Frame(notebook)
         self.tab_members = ttk.Frame(notebook)
         self.tab_active = ttk.Frame(notebook)
         self.tab_history = ttk.Frame(notebook)
         self.tab_settings = ttk.Frame(notebook)
+        notebook.add(self.tab_monitor, text="監控總覽")
         notebook.add(self.tab_cards, text="卡片牆")
         notebook.add(self.tab_members, text="成員與開播狀態")
         notebook.add(self.tab_active, text="錄影中")
         notebook.add(self.tab_history, text="錄影歷史")
         notebook.add(self.tab_settings, text="設定")
 
+        self.build_monitor_tab()
         self.build_cards_tab()
         self.build_members_tab()
         self.build_active_tab()
@@ -242,6 +258,67 @@ class RecorderGui:
         ttk.Label(card, text=title, style="CardTitle.TLabel").pack(anchor="w")
         ttk.Label(card, textvariable=var, style="CardValue.TLabel").pack(anchor="w")
         return card
+
+    def build_monitor_tab(self):
+        tip = ttk.Frame(self.tab_monitor, padding=8)
+        tip.pack(fill=tk.X)
+        ttk.Label(
+            tip,
+            text="配信監控：先看「目前開播中」，再確認錄影狀態（對齊配信確認くん式主畫面）",
+            style="Sub.TLabel",
+        ).pack(anchor="w")
+
+        live_box = ttk.LabelFrame(self.tab_monitor, text="目前開播中", padding=8)
+        live_box.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        cols = ("nickname", "uid", "recording", "checker_launch")
+        self.monitor_live_tree = ttk.Treeview(live_box, columns=cols, show="headings", height=8)
+        self.monitor_live_tree.heading("nickname", text="暱稱")
+        self.monitor_live_tree.heading("uid", text="UID")
+        self.monitor_live_tree.heading("recording", text="錄影狀態")
+        self.monitor_live_tree.heading("checker_launch", text="Checker 本次觸發")
+        self.monitor_live_tree.column("nickname", width=200)
+        self.monitor_live_tree.column("uid", width=120, anchor=tk.CENTER)
+        self.monitor_live_tree.column("recording", width=120, anchor=tk.CENTER)
+        self.monitor_live_tree.column("checker_launch", width=140, anchor=tk.CENTER)
+        self.monitor_live_tree.pack(fill=tk.BOTH, expand=True)
+        self.monitor_live_tree.bind("<Double-1>", lambda _e: self.start_selected_monitor_live())
+
+        roster_box = ttk.LabelFrame(self.tab_monitor, text="監控名單（開播優先排序）", padding=8)
+        roster_box.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+
+        rcols = ("nickname", "uid", "is_live", "recording", "last_live")
+        self.monitor_roster_tree = ttk.Treeview(roster_box, columns=rcols, show="headings", height=14)
+        self.monitor_roster_tree.heading("nickname", text="暱稱")
+        self.monitor_roster_tree.heading("uid", text="UID")
+        self.monitor_roster_tree.heading("is_live", text="開播")
+        self.monitor_roster_tree.heading("recording", text="錄影狀態")
+        self.monitor_roster_tree.heading("last_live", text="上次開播偵測")
+        self.monitor_roster_tree.column("nickname", width=200)
+        self.monitor_roster_tree.column("uid", width=120, anchor=tk.CENTER)
+        self.monitor_roster_tree.column("is_live", width=72, anchor=tk.CENTER)
+        self.monitor_roster_tree.column("recording", width=120, anchor=tk.CENTER)
+        self.monitor_roster_tree.column("last_live", width=180, anchor=tk.CENTER)
+        self.monitor_roster_tree.pack(fill=tk.BOTH, expand=True)
+        self.monitor_roster_tree.bind("<Double-1>", lambda _e: self.start_selected_monitor_roster())
+
+    def start_selected_monitor_live(self):
+        selected = self.monitor_live_tree.selection()
+        if not selected:
+            return
+        uid = self.monitor_live_tree.item(selected[0], "values")[1]
+        if not uid or uid == "-":
+            return
+        self.start_member_by_uid(uid)
+
+    def start_selected_monitor_roster(self):
+        selected = self.monitor_roster_tree.selection()
+        if not selected:
+            return
+        uid = self.monitor_roster_tree.item(selected[0], "values")[1]
+        if not uid or uid == "-":
+            return
+        self.start_member_by_uid(uid)
 
     def build_cards_tab(self):
         tip = ttk.Frame(self.tab_cards, padding=4)
@@ -390,16 +467,20 @@ class RecorderGui:
         ttk.Button(toolbar, text="對選取成員立即錄影", command=self.start_selected_member).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Label(toolbar, text="提示：雙擊可快速錄影", style="Sub.TLabel").pack(side=tk.LEFT)
 
-        cols = ("uid", "nickname", "is_live", "launched")
+        cols = ("uid", "nickname", "is_live", "recording", "checker_launch", "last_live")
         self.member_tree = ttk.Treeview(self.tab_members, columns=cols, show="headings", height=24)
         self.member_tree.heading("uid", text="UID")
         self.member_tree.heading("nickname", text="暱稱")
         self.member_tree.heading("is_live", text="開播狀態")
-        self.member_tree.heading("launched", text="已觸發錄影")
-        self.member_tree.column("uid", width=130, anchor=tk.CENTER)
-        self.member_tree.column("nickname", width=220)
-        self.member_tree.column("is_live", width=100, anchor=tk.CENTER)
-        self.member_tree.column("launched", width=120, anchor=tk.CENTER)
+        self.member_tree.heading("recording", text="錄影狀態")
+        self.member_tree.heading("checker_launch", text="Checker 觸發")
+        self.member_tree.heading("last_live", text="上次開播偵測")
+        self.member_tree.column("uid", width=120, anchor=tk.CENTER)
+        self.member_tree.column("nickname", width=180)
+        self.member_tree.column("is_live", width=88, anchor=tk.CENTER)
+        self.member_tree.column("recording", width=100, anchor=tk.CENTER)
+        self.member_tree.column("checker_launch", width=100, anchor=tk.CENTER)
+        self.member_tree.column("last_live", width=170, anchor=tk.CENTER)
         self.member_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
         self.member_tree.bind("<Double-1>", lambda _e: self.start_selected_member())
 
@@ -456,6 +537,7 @@ class RecorderGui:
         ttk.Label(title, text="設定頁（config.json）", style="Header.TLabel").pack(side=tk.LEFT)
         ttk.Button(title, text="重載設定", command=self.reload_settings_from_disk).pack(side=tk.RIGHT, padx=4)
         ttk.Button(title, text="儲存設定", command=self.save_settings_to_disk).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(title, text="還原預設", command=self.reset_settings_to_default).pack(side=tk.RIGHT, padx=4)
 
         recorder_box = ttk.LabelFrame(wrap, text="Recorder 參數", padding=10)
         recorder_box.pack(fill=tk.X, pady=(0, 10))
@@ -481,16 +563,16 @@ class RecorderGui:
         ttk.Entry(parent, textvariable=var, width=24).grid(row=row_idx, column=1, sticky="w", pady=4)
 
     def load_settings_to_form(self):
-        recorder = self.config_data.get("recorder", {})
+        recorder = normalize_recorder_config(self.config_data.get("recorder", {}))
         gate = self.config_data.get("alpha5_gate", {})
-        self.cfg_stall_seconds.set(str(recorder.get("stall_seconds", 20)))
-        self.cfg_max_stall_restarts.set(str(recorder.get("max_stall_restarts", 20)))
-        self.cfg_stall_check_after.set(str(recorder.get("stall_check_after_seconds", 30)))
-        self.cfg_min_segment_seconds.set(str(recorder.get("min_segment_seconds", 120)))
-        self.cfg_fast_retry_limit.set(str(recorder.get("fast_retry_limit", 3)))
-        self.cfg_fast_retry_delay.set(str(recorder.get("fast_retry_delay_seconds", 2)))
-        self.cfg_backoff_base.set(str(recorder.get("backoff_base_seconds", 5)))
-        self.cfg_backoff_max.set(str(recorder.get("backoff_max_seconds", 60)))
+        self.cfg_stall_seconds.set(str(recorder["stall_seconds"]))
+        self.cfg_max_stall_restarts.set(str(recorder["max_stall_restarts"]))
+        self.cfg_stall_check_after.set(str(recorder["stall_check_after_seconds"]))
+        self.cfg_min_segment_seconds.set(str(recorder["min_segment_seconds"]))
+        self.cfg_fast_retry_limit.set(str(recorder["fast_retry_limit"]))
+        self.cfg_fast_retry_delay.set(str(recorder["fast_retry_delay_seconds"]))
+        self.cfg_backoff_base.set(str(recorder["backoff_base_seconds"]))
+        self.cfg_backoff_max.set(str(recorder["backoff_max_seconds"]))
 
         self.cfg_gate_days.set(str(gate.get("days", 3)))
         self.cfg_gate_min_records.set(str(gate.get("min_records", 30)))
@@ -502,6 +584,36 @@ class RecorderGui:
         self.config_data = load_json(CONFIG_FILE, {})
         self.load_settings_to_form()
         self.status_var.set("設定已從磁碟重載")
+
+    def reset_settings_to_default(self):
+        self.config_data["recorder"] = dict(DEFAULT_RECORDER_CONFIG)
+        self.config_data["alpha5_gate"] = {
+            "days": 3,
+            "min_records": 30,
+            "min_success_rate": 0.9,
+            "max_avg_restarts": 1.2,
+            "max_short_ratio": 0.35,
+        }
+        self.load_settings_to_form()
+        self.status_var.set("設定已還原預設值，請按『儲存設定』套用")
+
+    def validate_settings(self, new_config):
+        recorder = new_config["recorder"]
+        if recorder["backoff_max_seconds"] < recorder["backoff_base_seconds"]:
+            return False, "backoff_max_seconds 需大於或等於 backoff_base_seconds"
+
+        gate = new_config["alpha5_gate"]
+        if gate["days"] <= 0:
+            return False, "days 需大於 0"
+        if gate["min_records"] <= 0:
+            return False, "min_records 需大於 0"
+        if gate["min_success_rate"] < 0 or gate["min_success_rate"] > 1:
+            return False, "min_success_rate 需介於 0 到 1"
+        if gate["max_avg_restarts"] < 0:
+            return False, "max_avg_restarts 需大於或等於 0"
+        if gate["max_short_ratio"] < 0 or gate["max_short_ratio"] > 1:
+            return False, "max_short_ratio 需介於 0 到 1"
+        return True, ""
 
     def save_settings_to_disk(self):
         try:
@@ -526,6 +638,12 @@ class RecorderGui:
             }
         except ValueError:
             messagebox.showerror("錯誤", "設定格式錯誤，請確認數值欄位。")
+            return
+
+        new_config["recorder"] = normalize_recorder_config(new_config["recorder"])
+        ok, err = self.validate_settings(new_config)
+        if not ok:
+            messagebox.showerror("錯誤", "設定驗證失敗：{0}".format(err))
             return
 
         ok = save_json(CONFIG_FILE, new_config)
@@ -606,12 +724,40 @@ class RecorderGui:
 
     def load_members(self):
         checker = load_json(CHECKER_STATE_FILE, {})
+        snap_group = str(checker.get("group", "") or "")
+        if snap_group and snap_group != self.last_checker_group:
+            self.last_checker_group = snap_group
+            self._monitor_baseline_done = False
+            self.prev_live_uids = set()
         members_snapshot = checker.get("members", [])
         keyword = self.search_var.get().strip().lower()
         filter_mode = self.filter_var.get()
         self.member_map = {str(m.get("uid", "")): m for m in members_snapshot}
         total_live_count = len([m for m in members_snapshot if m.get("is_live")])
         active_data = load_json(ACTIVE_RECORDINGS_FILE, {})
+        current_live_uids = {str(m.get("uid", "")) for m in members_snapshot if m.get("is_live") and str(m.get("uid", ""))}
+        new_live_alerted = False
+
+        if not self._monitor_baseline_done:
+            self.prev_live_uids = set(current_live_uids)
+            self._monitor_baseline_done = True
+        else:
+            new_live_uids = current_live_uids - self.prev_live_uids
+            if new_live_uids:
+                labels = []
+                for uid in sorted(new_live_uids):
+                    mm = self.member_map.get(uid, {})
+                    labels.append("{0} ({1})".format(mm.get("nickname", "") or uid, uid))
+                msg = "新開播：\n" + "\n".join(labels)
+                self.status_var.set(msg.replace("\n", " / "))
+                new_live_alerted = True
+                if self.alert_new_live_sound_var.get() and winsound is not None and os.name == "nt":
+                    try:
+                        winsound.MessageBeep(winsound.MB_ICONASTERISK)
+                    except Exception:
+                        pass
+            self.prev_live_uids = set(current_live_uids)
+
         filtered_members = []
         for m in members_snapshot:
             uid = str(m.get("uid", ""))
@@ -626,6 +772,14 @@ class RecorderGui:
                 continue
             filtered_members.append(m)
 
+        filtered_members.sort(
+            key=lambda mm: (
+                not bool(mm.get("is_live")),
+                not (str(mm.get("uid", "")) in active_data),
+                (mm.get("nickname", "") or "").lower(),
+            )
+        )
+
         live_count = 0
         members_rows = []
         for m in filtered_members:
@@ -634,8 +788,15 @@ class RecorderGui:
             is_live = "開播中" if m.get("is_live") else "離線"
             if m.get("is_live"):
                 live_count += 1
-            launched = "錄影中" if uid in active_data else ("是" if m.get("launched_recorder") else "-")
-            members_rows.append((uid, nickname, is_live, launched))
+            if uid in active_data:
+                recording = "錄影中"
+            elif m.get("launched_recorder"):
+                recording = "已觸發"
+            else:
+                recording = "-"
+            checker_launch = "是" if m.get("launched_recorder") else "-"
+            last_live = m.get("last_live_at", "") or "-"
+            members_rows.append((uid, nickname, is_live, recording, checker_launch, last_live))
 
         if members_rows != self.last_members_signature:
             selected = self.member_tree.selection()
@@ -656,6 +817,56 @@ class RecorderGui:
                         break
             self.last_members_signature = members_rows
 
+        live_rows = []
+        roster_rows = []
+        for m in members_snapshot:
+            uid = str(m.get("uid", ""))
+            if not uid:
+                continue
+            nickname = m.get("nickname", "") or "-"
+            is_live_flag = bool(m.get("is_live"))
+            if uid in active_data:
+                recording = "錄影中"
+            elif m.get("launched_recorder"):
+                recording = "已觸發"
+            else:
+                recording = "-"
+            checker_launch = "是" if m.get("launched_recorder") else "-"
+            last_live = m.get("last_live_at", "") or "-"
+            if is_live_flag:
+                live_rows.append((nickname, uid, recording, checker_launch))
+            roster_rows.append(
+                (
+                    nickname,
+                    uid,
+                    "是" if is_live_flag else "否",
+                    recording,
+                    last_live,
+                )
+            )
+        live_rows.sort(key=lambda r: (r[2] != "錄影中", r[0].lower()))
+        roster_rows.sort(
+            key=lambda r: (
+                r[2] != "是",
+                r[3] != "錄影中",
+                r[0].lower(),
+            )
+        )
+        monitor_sig = (tuple(live_rows), tuple(roster_rows))
+        if monitor_sig != self.last_monitor_live_signature:
+            for iid in self.monitor_live_tree.get_children():
+                self.monitor_live_tree.delete(iid)
+            for row in live_rows:
+                self.monitor_live_tree.insert("", tk.END, values=row)
+            if not live_rows:
+                self.monitor_live_tree.insert("", tk.END, values=("-", "-", "無", "-"))
+
+            for iid in self.monitor_roster_tree.get_children():
+                self.monitor_roster_tree.delete(iid)
+            for row in roster_rows:
+                self.monitor_roster_tree.insert("", tk.END, values=row)
+            self.last_monitor_live_signature = monitor_sig
+
         cards_signature = [
             (
                 str(m.get("uid", "")),
@@ -673,13 +884,15 @@ class RecorderGui:
             self.last_cards_signature = cards_signature
 
         updated_at = checker.get("updated_at", "-")
+        chk_interval = checker.get("interval", "-")
         self.live_count_var.set(str(total_live_count))
         self.summary_var.set(
-            "最近快照更新：{0}    監控群組：{1}    目前顯示：{2}".format(
-                updated_at, checker.get("group", "-"), len(filtered_members)
+            "最近快照：{0}    Checker 間隔：{1}s    群組：{2}    清單列數：{3}".format(
+                updated_at, chk_interval, checker.get("group", "-"), len(filtered_members)
             )
         )
-        self.status_var.set("資料已刷新")
+        if not new_live_alerted:
+            self.status_var.set("資料已刷新")
 
     def load_active(self):
         active_data = load_json(ACTIVE_RECORDINGS_FILE, {})

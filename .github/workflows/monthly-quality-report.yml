@@ -1,0 +1,43 @@
+name: Monthly Quality Report
+
+on:
+  workflow_dispatch:
+    inputs:
+      year:
+        description: "Report year (e.g. 2026)"
+        required: true
+        default: "2026"
+      month:
+        description: "Report month (1-12)"
+        required: true
+        default: "1"
+  schedule:
+    - cron: "0 2 1 * *"
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Generate report
+        run: |
+          YEAR_INPUT="${{ github.event.inputs.year }}"
+          MONTH_INPUT="${{ github.event.inputs.month }}"
+          if [ -z "$YEAR_INPUT" ]; then YEAR_INPUT=$(date +%Y); fi
+          if [ -z "$MONTH_INPUT" ]; then MONTH_INPUT=$(date +%-m); fi
+          mkdir -p data
+          echo "[]" > data/recording_history.json
+          python monthly_quality_report.py --year "$YEAR_INPUT" --month "$MONTH_INPUT"
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: monthly-quality-report
+          path: data/reports/*.md

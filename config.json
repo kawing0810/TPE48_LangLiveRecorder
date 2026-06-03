@@ -7,7 +7,8 @@
     "fast_retry_limit": 3,
     "fast_retry_delay_seconds": 2,
     "backoff_base_seconds": 5,
-    "backoff_max_seconds": 60
+    "backoff_max_seconds": 60,
+    "output_mode": "remux"
   },
   "alpha5_gate": {
     "days": 3,

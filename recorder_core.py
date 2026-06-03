@@ -13,7 +13,15 @@ DEFAULT_RECORDER_CONFIG = {
     "fast_retry_delay_seconds": 2,
     "backoff_base_seconds": 5,
     "backoff_max_seconds": 60,
+    "output_mode": "remux",
 }
+
+OUTPUT_MODES = ("copy", "remux")
+FFMPEG_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/54.0.2840.99 Safari/537.36"
+)
+FFMPEG_HEADERS = "Cookie: licenseUID=eF9e9f798fedD28ee49Df472DE957B"
 
 
 def _to_int(value, default):
@@ -30,7 +38,10 @@ def clamp(value, minimum, maximum):
 def normalize_recorder_config(raw_cfg):
     cfg = deepcopy(DEFAULT_RECORDER_CONFIG)
     source = raw_cfg or {}
+    output_mode = source.get("output_mode", cfg["output_mode"])
     for key, default in DEFAULT_RECORDER_CONFIG.items():
+        if key == "output_mode":
+            continue
         cfg[key] = _to_int(source.get(key, default), default)
 
     # Safety bounds: avoid pathological settings that break recorder loops.
@@ -44,7 +55,41 @@ def normalize_recorder_config(raw_cfg):
     cfg["backoff_max_seconds"] = clamp(cfg["backoff_max_seconds"], 1, 3600)
     if cfg["backoff_max_seconds"] < cfg["backoff_base_seconds"]:
         cfg["backoff_max_seconds"] = cfg["backoff_base_seconds"]
+    cfg["output_mode"] = normalize_output_mode(output_mode)
     return cfg
+
+
+def normalize_output_mode(value):
+    mode = str(value or "remux").strip().lower()
+    if mode not in OUTPUT_MODES:
+        return "remux"
+    return mode
+
+
+def build_ffmpeg_record_cmd(ffmpeg_bin, live_url, output_file, output_mode="remux"):
+    mode = normalize_output_mode(output_mode)
+    cmd = [ffmpeg_bin]
+    if mode == "remux":
+        cmd.extend(["-fflags", "+genpts+discardcorrupt"])
+    cmd.extend([
+        "-m3u8_hold_counters", "100",
+        "-hide_banner",
+        "-loglevel", "warning",
+        "-stats",
+        "-user_agent", FFMPEG_USER_AGENT,
+        "-headers", FFMPEG_HEADERS,
+        "-i", live_url,
+    ])
+    if mode == "remux":
+        # Muxer/output options must come after -i (otherwise ffmpeg exits immediately).
+        cmd.extend([
+            "-avoid_negative_ts", "make_zero",
+            "-max_muxing_queue_size", "1024",
+            "-map", "0:v:0?",
+            "-map", "0:a:0?",
+        ])
+    cmd.extend(["-c", "copy", "-y", "-report", output_file])
+    return cmd
 
 
 def classify_failure_reason(reason_text, stalled=False):

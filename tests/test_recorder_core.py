@@ -1,9 +1,11 @@
 import unittest
 
 from recorder_core import (
+    build_ffmpeg_record_cmd,
     classify_failure_reason,
     get_retry_delay_seconds,
     normalize_recorder_config,
+    normalize_output_mode,
     should_rotate_segment,
 )
 
@@ -36,6 +38,26 @@ class RecorderCoreTests(unittest.TestCase):
         self.assertEqual(cfg["backoff_max_seconds"], 20)
         self.assertFalse(should_rotate_segment(50, 120))
         self.assertTrue(should_rotate_segment(120, 120))
+
+    def test_output_mode_and_ffmpeg_cmd(self):
+        self.assertEqual(normalize_output_mode("remux"), "remux")
+        self.assertEqual(normalize_output_mode("copy"), "copy")
+        self.assertEqual(normalize_output_mode("invalid"), "remux")
+        cfg = normalize_recorder_config({"output_mode": "copy"})
+        self.assertEqual(cfg["output_mode"], "copy")
+
+        remux_cmd = build_ffmpeg_record_cmd("ffmpeg", "http://example/live.m3u8", "out.ts", "remux")
+        self.assertIn("+genpts+discardcorrupt", remux_cmd)
+        self.assertIn("-map", remux_cmd)
+        self.assertIn("0:v:0?", remux_cmd)
+        self.assertIn("0:a:0?", remux_cmd)
+        i_idx = remux_cmd.index("-i")
+        mux_idx = remux_cmd.index("-max_muxing_queue_size")
+        self.assertLess(i_idx, mux_idx)
+
+        copy_cmd = build_ffmpeg_record_cmd("ffmpeg", "http://example/live.m3u8", "out.ts", "copy")
+        self.assertNotIn("+genpts+discardcorrupt", copy_cmd)
+        self.assertNotIn("0:v:0?", copy_cmd)
 
 
 if __name__ == "__main__":

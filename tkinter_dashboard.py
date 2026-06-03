@@ -99,7 +99,7 @@ def setup_tk_scaling(root):
 class RecorderGui:
     def __init__(self, root):
         self.root = root
-        self.root.title("TPE48 LangLiveRecorder Alpha 4")
+        self.root.title("TPE48 LangLiveRecorder 4.5.1-alpha")
         self.root.geometry("1320x780")
         self.root.minsize(1120, 650)
 

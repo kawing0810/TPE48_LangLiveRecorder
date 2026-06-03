@@ -20,6 +20,7 @@ from urllib.parse import urlparse
 
 from ttp_langLiveRecorder import ttpLangLiveRecorder
 from recorder_core import (
+    build_ffmpeg_record_cmd,
     classify_failure_reason,
     get_retry_delay_seconds,
     normalize_recorder_config,
@@ -44,6 +45,7 @@ FAST_RETRY_LIMIT = 3
 FAST_RETRY_DELAY_SECONDS = 2
 BACKOFF_BASE_SECONDS = 5
 BACKOFF_MAX_SECONDS = 60
+OUTPUT_MODE = "remux"
 
 langlive_id = "3650734"
 label = "TTP"
@@ -81,6 +83,7 @@ def applyRecorderConfig():
     global FAST_RETRY_DELAY_SECONDS
     global BACKOFF_BASE_SECONDS
     global BACKOFF_MAX_SECONDS
+    global OUTPUT_MODE
 
     cfg = normalize_recorder_config(loadConfig().get("recorder", {}))
     STALL_SECONDS = cfg["stall_seconds"]
@@ -91,6 +94,8 @@ def applyRecorderConfig():
     FAST_RETRY_DELAY_SECONDS = cfg["fast_retry_delay_seconds"]
     BACKOFF_BASE_SECONDS = cfg["backoff_base_seconds"]
     BACKOFF_MAX_SECONDS = cfg["backoff_max_seconds"]
+    OUTPUT_MODE = cfg["output_mode"]
+
 
 def doLiveRecording(live_url, output_file):
     tstart = time.time()
@@ -98,20 +103,7 @@ def doLiveRecording(live_url, output_file):
     stalled = False
     try:
         ffmpg_bin = os.path.join("./", current_path, "ffmpeg")
-        cmd = [
-            ffmpg_bin,
-            "-m3u8_hold_counters", "100",
-            "-hide_banner",
-            "-loglevel", "warning",
-            "-stats",
-            "-user_agent", "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/54.0.2840.99 Safari/537.36",
-            "-headers", "Cookie: licenseUID=eF9e9f798fedD28ee49Df472DE957B",
-            "-i", live_url,
-            "-c", "copy",
-            "-y",
-            "-report",
-            output_file
-        ]
+        cmd = build_ffmpeg_record_cmd(ffmpg_bin, live_url, output_file, OUTPUT_MODE)
 
         message = "START@ %s (%s)" % (nickname, langlive_id)
         print(message)

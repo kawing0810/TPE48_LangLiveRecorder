@@ -14,6 +14,7 @@ DEFAULT_RECORDER_CONFIG = {
     "backoff_base_seconds": 5,
     "backoff_max_seconds": 60,
     "output_mode": "remux",
+    "max_av_duration_gap_seconds": 30,
 }
 
 OUTPUT_MODES = ("copy", "remux")
@@ -45,7 +46,7 @@ def normalize_recorder_config(raw_cfg):
         cfg[key] = _to_int(source.get(key, default), default)
 
     # Safety bounds: avoid pathological settings that break recorder loops.
-    cfg["stall_seconds"] = clamp(cfg["stall_seconds"], 3, 300)
+    cfg["stall_seconds"] = clamp(cfg["stall_seconds"], 1, 300)
     cfg["max_stall_restarts"] = clamp(cfg["max_stall_restarts"], 0, 200)
     cfg["stall_check_after_seconds"] = clamp(cfg["stall_check_after_seconds"], 0, 600)
     cfg["min_segment_seconds"] = clamp(cfg["min_segment_seconds"], 10, 3600)
@@ -55,6 +56,12 @@ def normalize_recorder_config(raw_cfg):
     cfg["backoff_max_seconds"] = clamp(cfg["backoff_max_seconds"], 1, 3600)
     if cfg["backoff_max_seconds"] < cfg["backoff_base_seconds"]:
         cfg["backoff_max_seconds"] = cfg["backoff_base_seconds"]
+    cfg["max_av_duration_gap_seconds"] = clamp(
+        _to_int(source.get("max_av_duration_gap_seconds", cfg["max_av_duration_gap_seconds"]),
+                cfg["max_av_duration_gap_seconds"]),
+        5,
+        600,
+    )
     cfg["output_mode"] = normalize_output_mode(output_mode)
     return cfg
 
@@ -105,6 +112,8 @@ def classify_failure_reason(reason_text, stalled=False):
         return "audio_start_missing"
     if "有聲無畫" in reason or "缺少視訊串流" in reason:
         return "video_missing"
+    if "聲畫時長差異" in reason:
+        return "av_duration_mismatch"
     if "輸出檔案過小" in reason or "找不到輸出檔案" in reason:
         return "output_small_or_missing"
     if "ffprobe" in reason:
@@ -122,3 +131,36 @@ def get_retry_delay_seconds(restart_count, fast_retry_limit, fast_retry_delay_se
 
 def should_rotate_segment(elapsed_seconds, min_segment_seconds):
     return int(elapsed_seconds) >= int(min_segment_seconds)
+
+
+def stream_duration_seconds(stream):
+    if not isinstance(stream, dict):
+        return None
+    duration = stream.get("duration")
+    if duration is None:
+        return None
+    try:
+        value = float(duration)
+    except (TypeError, ValueError):
+        return None
+    if value < 0:
+        return None
+    return value
+
+
+def check_av_duration_gap(streams, max_gap_seconds=30):
+    video_duration = None
+    audio_duration = None
+    for stream in streams or []:
+        codec = stream.get("codec_type")
+        duration = stream_duration_seconds(stream)
+        if duration is None:
+            continue
+        if codec == "video":
+            video_duration = duration
+        elif codec == "audio":
+            audio_duration = duration
+    if video_duration is None or audio_duration is None:
+        return True, None, video_duration, audio_duration
+    gap = abs(video_duration - audio_duration)
+    return gap <= float(max_gap_seconds), gap, video_duration, audio_duration

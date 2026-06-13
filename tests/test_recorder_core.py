@@ -2,6 +2,7 @@ import unittest
 
 from recorder_core import (
     build_ffmpeg_record_cmd,
+    check_av_duration_gap,
     classify_failure_reason,
     get_retry_delay_seconds,
     normalize_recorder_config,
@@ -16,6 +17,7 @@ class RecorderCoreTests(unittest.TestCase):
         self.assertEqual(classify_failure_reason("HTTP 404"), "source_404")
         self.assertEqual(classify_failure_reason("有聲無畫"), "video_missing")
         self.assertEqual(classify_failure_reason("開頭無音訊（疑似開場異常）"), "audio_start_missing")
+        self.assertEqual(classify_failure_reason("聲畫時長差異過大（120.0s）"), "av_duration_mismatch")
         self.assertEqual(classify_failure_reason("whatever", stalled=True), "network_stall")
 
     def test_retry_delay(self):
@@ -32,7 +34,7 @@ class RecorderCoreTests(unittest.TestCase):
             "backoff_base_seconds": 20,
             "backoff_max_seconds": 10,
         })
-        self.assertEqual(cfg["stall_seconds"], 3)
+        self.assertEqual(cfg["stall_seconds"], 1)
         self.assertEqual(cfg["max_stall_restarts"], 0)
         self.assertEqual(cfg["backoff_base_seconds"], 20)
         self.assertEqual(cfg["backoff_max_seconds"], 20)
@@ -58,6 +60,24 @@ class RecorderCoreTests(unittest.TestCase):
         copy_cmd = build_ffmpeg_record_cmd("ffmpeg", "http://example/live.m3u8", "out.ts", "copy")
         self.assertNotIn("+genpts+discardcorrupt", copy_cmd)
         self.assertNotIn("0:v:0?", copy_cmd)
+
+    def test_check_av_duration_gap(self):
+        streams = [
+            {"codec_type": "video", "duration": "100.0"},
+            {"codec_type": "audio", "duration": "200.0"},
+        ]
+        ok, gap, video_duration, audio_duration = check_av_duration_gap(streams, 30)
+        self.assertFalse(ok)
+        self.assertAlmostEqual(gap, 100.0)
+        self.assertAlmostEqual(video_duration, 100.0)
+        self.assertAlmostEqual(audio_duration, 200.0)
+
+        ok, gap, _, _ = check_av_duration_gap(
+            [{"codec_type": "video", "duration": "100.0"}, {"codec_type": "audio", "duration": "110.0"}],
+            30,
+        )
+        self.assertTrue(ok)
+        self.assertAlmostEqual(gap, 10.0)
 
 
 if __name__ == "__main__":

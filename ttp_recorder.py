@@ -21,10 +21,10 @@ from urllib.parse import urlparse
 from ttp_langLiveRecorder import ttpLangLiveRecorder
 from recorder_core import (
     build_ffmpeg_record_cmd,
+    check_av_duration_gap,
     classify_failure_reason,
     get_retry_delay_seconds,
     normalize_recorder_config,
-    should_rotate_segment,
 )
 
 sys.stdout.reconfigure(encoding='utf-8')
@@ -46,6 +46,7 @@ FAST_RETRY_DELAY_SECONDS = 2
 BACKOFF_BASE_SECONDS = 5
 BACKOFF_MAX_SECONDS = 60
 OUTPUT_MODE = "remux"
+MAX_AV_DURATION_GAP_SECONDS = 30
 
 langlive_id = "3650734"
 label = "TTP"
@@ -84,6 +85,7 @@ def applyRecorderConfig():
     global BACKOFF_BASE_SECONDS
     global BACKOFF_MAX_SECONDS
     global OUTPUT_MODE
+    global MAX_AV_DURATION_GAP_SECONDS
 
     cfg = normalize_recorder_config(loadConfig().get("recorder", {}))
     STALL_SECONDS = cfg["stall_seconds"]
@@ -95,6 +97,7 @@ def applyRecorderConfig():
     BACKOFF_BASE_SECONDS = cfg["backoff_base_seconds"]
     BACKOFF_MAX_SECONDS = cfg["backoff_max_seconds"]
     OUTPUT_MODE = cfg["output_mode"]
+    MAX_AV_DURATION_GAP_SECONDS = cfg["max_av_duration_gap_seconds"]
 
 
 def doLiveRecording(live_url, output_file):
@@ -214,7 +217,20 @@ def validateRecordingFile(output_file, elapsed_seconds):
         if not hasAudioPacketsAtStart(output_file, start_window):
             return False, "開頭無音訊（疑似開場異常）", {"has_video": True, "has_audio": True}
 
-        return True, "正常", {"has_video": True, "has_audio": True}
+        ok_gap, gap, video_duration, audio_duration = check_av_duration_gap(
+            streams, MAX_AV_DURATION_GAP_SECONDS
+        )
+        stream_info = {
+            "has_video": True,
+            "has_audio": True,
+            "video_duration": video_duration,
+            "audio_duration": audio_duration,
+            "av_duration_gap": gap,
+        }
+        if not ok_gap:
+            return False, "聲畫時長差異過大（{0:.1f}s）".format(gap), stream_info
+
+        return True, "正常", stream_info
     except Exception as e:
         return False, "檢查例外: {0}".format(e), {"has_video": False, "has_audio": False}
 
@@ -448,9 +464,12 @@ if live_url != False and live_url != '':
                 break
 
             live_url = getHDLiveUrl(live_url_retry)
-            # 避免過早碎檔：分段太短時沿用同檔名覆蓋重試
-            if should_rotate_segment(elapsed_seconds, MIN_SEGMENT_SECONDS):
-                current_output_file = oRecorder.getOutputFile(langlive_id)
+            # stall 重啟一律新檔名，避免 -y 覆寫造成時間軸錯亂（畫面加速/無聲）
+            current_output_file = oRecorder.getOutputFile(langlive_id)
+            if os.path.exists(current_output_file):
+                base, ext = os.path.splitext(current_output_file)
+                current_output_file = "{0}_r{1}{2}".format(base, restart_count, ext)
+            print("** new output file: %s" % os.path.basename(current_output_file))
             current_nickname = nickname_retry or current_nickname
             current_avatar_url = avatar_retry
             current_liveimg_url = liveimg_retry

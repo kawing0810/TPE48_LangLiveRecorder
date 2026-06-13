@@ -1,14 +1,15 @@
 {
   "recorder": {
-    "stall_seconds": 20,
+    "stall_seconds": 15,
     "max_stall_restarts": 20,
-    "stall_check_after_seconds": 30,
+    "stall_check_after_seconds": 5,
     "min_segment_seconds": 120,
     "fast_retry_limit": 3,
     "fast_retry_delay_seconds": 2,
     "backoff_base_seconds": 5,
     "backoff_max_seconds": 60,
-    "output_mode": "remux"
+    "output_mode": "remux",
+    "max_av_duration_gap_seconds": 30
   },
   "alpha5_gate": {
     "days": 3,

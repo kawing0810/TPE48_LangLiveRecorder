@@ -1,7 +1,7 @@
 TPE48 LangLiveRecorder
 ======================================
 
-本文件最後更新：2026-06-02
+本文件最後更新：2026-06-10
 
 --------------------------------------
 專案定位
@@ -19,8 +19,8 @@ TPE48 LangLiveRecorder 用於監控 Lang Live 開播狀態，並透過 ffmpeg �
 --------------------------------------
 目前版本與追蹤方式
 --------------------------------------
-- 建議版本字串：4.5.1-alpha（開發線）
-- 建議 Git tag：v4.5.1-alpha
+- 建議版本字串：4.5.2-alpha（開發線）
+- 建議 Git tag：v4.5.2-alpha
 - 目前主要分支：alpha5-dev
 - 正式發版基底：master
 
@@ -54,7 +54,7 @@ TPE48 LangLiveRecorder 用於監控 Lang Live 開播狀態，並透過 ffmpeg �
 --------------------------------------
 集中管理錄影穩定性與品質門檻，主要區塊如下：
 
-- recorder.*：卡住秒數、重啟上限、分段與退避策略
+- recorder.*：卡住秒數、重啟上限、分段與退避策略、output_mode（remux/copy）、max_av_duration_gap_seconds
 - alpha5_gate.*：升版檢查門檻
 - monthly_quality.*：月報門檻設定
 
@@ -90,7 +90,7 @@ Tkinter 控制台可直接載入、編輯、驗證與儲存設定。
 --------------------------------------
 輸出資料
 --------------------------------------
-- 錄影檔：{uid}Y_YYMMDD_HH_MM_SS.ts
+- 錄影檔：{uid}Y_YYMMDD_HH_MM_SS.ts（stall 重啟會產生新檔，同秒重啟可能帶 _rN 後綴）
 - 封面：liveimg/*_liveimg.*
 - 快照：data/dashboard_state.json
 - 錄影中：data/active_recordings.json
@@ -143,15 +143,20 @@ docs/release_train.md
 
 
 --------------------------------------
-近期版本重點（4.5.1-alpha）
+近期版本重點（4.5.2-alpha）
 --------------------------------------
+- stall 重啟一律新檔名，避免 -y 覆寫同一檔造成時間軸錯亂（畫面加速/後段無聲）
+- 錄完驗證視訊/音訊 duration 差（max_av_duration_gap_seconds，預設 30 秒）
+- 預設 stall 偵測 15 秒、開場 grace 5 秒（config.json 可調）
 - 預設 remux 錄影（genpts、A/V map、mux 參數順序修正）
-- 長場錄影實測：播放順暢、聲畫同步（取代純 copy 卡畫問題）
 - 錄影決策邏輯模組化（recorder_core.py、output_mode 設定）
-- 錄畫模式 MVP（record_mvp_launcher.py）
-- 監控總覽優化（新開播提示、排序、狀態可讀性）
 - Gate / 月報與 CI 串接
 - 測試基礎建立（test_recorder_core.py / test_alpha5_gate.py）
+
+上一版（4.5.1-alpha）重點：
+- remux 長場錄影實測通過（播放順暢、聲畫同步）
+- 錄畫模式 MVP（record_mvp_launcher.py）
+- 監控總覽優化（新開播提示、排序、狀態可讀性）
 
 
 --------------------------------------

@@ -21,10 +21,14 @@ from urllib.parse import urlparse
 from ttp_langLiveRecorder import ttpLangLiveRecorder
 from recorder_core import (
     build_ffmpeg_record_cmd,
-    check_av_duration_gap,
+    check_av_duration_gap_values,
     classify_failure_reason,
     get_retry_delay_seconds,
+    next_audio_only_probe_streak,
     normalize_recorder_config,
+    probe_av_durations,
+    probe_av_durations_ffprobe,
+    resolve_ffprobe_bin,
 )
 
 sys.stdout.reconfigure(encoding='utf-8')
@@ -47,6 +51,10 @@ BACKOFF_BASE_SECONDS = 5
 BACKOFF_MAX_SECONDS = 60
 OUTPUT_MODE = "remux"
 MAX_AV_DURATION_GAP_SECONDS = 30
+AV_CHECK_INTERVAL_SECONDS = 3
+AUDIO_ONLY_PROBE_FAIL_COUNT = 1
+FFMPEG_LOGLEVEL = "error"
+FFMPEG_RECONNECT = False
 
 langlive_id = "3650734"
 label = "TTP"
@@ -86,6 +94,10 @@ def applyRecorderConfig():
     global BACKOFF_MAX_SECONDS
     global OUTPUT_MODE
     global MAX_AV_DURATION_GAP_SECONDS
+    global AV_CHECK_INTERVAL_SECONDS
+    global AUDIO_ONLY_PROBE_FAIL_COUNT
+    global FFMPEG_LOGLEVEL
+    global FFMPEG_RECONNECT
 
     cfg = normalize_recorder_config(loadConfig().get("recorder", {}))
     STALL_SECONDS = cfg["stall_seconds"]
@@ -98,15 +110,27 @@ def applyRecorderConfig():
     BACKOFF_MAX_SECONDS = cfg["backoff_max_seconds"]
     OUTPUT_MODE = cfg["output_mode"]
     MAX_AV_DURATION_GAP_SECONDS = cfg["max_av_duration_gap_seconds"]
+    AV_CHECK_INTERVAL_SECONDS = cfg["av_check_interval_seconds"]
+    AUDIO_ONLY_PROBE_FAIL_COUNT = cfg["audio_only_probe_fail_count"]
+    FFMPEG_LOGLEVEL = cfg["ffmpeg_loglevel"]
+    FFMPEG_RECONNECT = cfg["ffmpeg_reconnect"]
 
 
 def doLiveRecording(live_url, output_file):
     tstart = time.time()
     success = False
     stalled = False
+    av_gap_abort = False
     try:
         ffmpg_bin = os.path.join("./", current_path, "ffmpeg")
-        cmd = build_ffmpeg_record_cmd(ffmpg_bin, live_url, output_file, OUTPUT_MODE)
+        cmd = build_ffmpeg_record_cmd(
+            ffmpg_bin,
+            live_url,
+            output_file,
+            OUTPUT_MODE,
+            ffmpeg_loglevel=FFMPEG_LOGLEVEL,
+            ffmpeg_reconnect=FFMPEG_RECONNECT,
+        )
 
         message = "START@ %s (%s)" % (nickname, langlive_id)
         print(message)
@@ -115,19 +139,75 @@ def doLiveRecording(live_url, output_file):
         last_size = -1
         last_grow_ts = time.time()
         check_start_ts = time.time()
+        last_av_check_ts = 0
+        ffprobe_bin = resolve_ffprobe_bin(current_path)
+        warned_no_ffprobe = False
+        audio_only_probe_streak = 0
         while process.poll() is None:
             time.sleep(1)
             size_now = os.path.getsize(output_file) if os.path.exists(output_file) else 0
+            now_ts = time.time()
+
+            if (
+                size_now >= 1024 * 64
+                and now_ts - check_start_ts >= STALL_CHECK_AFTER_SECONDS
+                and now_ts - last_av_check_ts >= AV_CHECK_INTERVAL_SECONDS
+            ):
+                last_av_check_ts = now_ts
+                video_duration, audio_duration, probe_method, probe_error = probe_av_durations_ffprobe(
+                    current_path, output_file, ffprobe_bin=ffprobe_bin
+                )
+                if probe_error == "ffprobe_missing" and not warned_no_ffprobe:
+                    warned_no_ffprobe = True
+                    print("** warning: ffprobe not found; live AV checks need ffprobe.exe beside ffmpeg")
+                ok_gap, gap, _, _ = check_av_duration_gap_values(
+                    video_duration, audio_duration, MAX_AV_DURATION_GAP_SECONDS
+                )
+                if ffprobe_bin and probe_error != "ffprobe_missing":
+                    audio_only_probe_streak = next_audio_only_probe_streak(
+                        audio_only_probe_streak,
+                        video_duration,
+                        audio_duration,
+                        probe_error,
+                    )
+                if (
+                    ffprobe_bin
+                    and audio_only_probe_streak >= AUDIO_ONLY_PROBE_FAIL_COUNT
+                ):
+                    av_gap_abort = True
+                    print(
+                        "** audio-only probe %sx (no video stream), stopping segment..."
+                        % audio_only_probe_streak
+                    )
+                    process.terminate()
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    break
+                if video_duration is not None and audio_duration is not None and not ok_gap:
+                    av_gap_abort = True
+                    print(
+                        "** AV duration gap %.1fs exceeds %ss, stopping segment..."
+                        % (gap, MAX_AV_DURATION_GAP_SECONDS)
+                    )
+                    process.terminate()
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    break
+
             if size_now > last_size:
                 last_size = size_now
-                last_grow_ts = time.time()
+                last_grow_ts = now_ts
                 continue
 
             # 剛開錄前幾秒常有切片等待，避免太早誤判卡住
-            if time.time() - check_start_ts < STALL_CHECK_AFTER_SECONDS:
+            if now_ts - check_start_ts < STALL_CHECK_AFTER_SECONDS:
                 continue
 
-            if time.time() - last_grow_ts >= STALL_SECONDS:
+            if now_ts - last_grow_ts >= STALL_SECONDS:
                 stalled = True
                 print("** stalled for %ss (after %ss grace), restarting recorder..." % (STALL_SECONDS, STALL_CHECK_AFTER_SECONDS))
                 process.terminate()
@@ -137,7 +217,7 @@ def doLiveRecording(live_url, output_file):
                     process.kill()
                 break
 
-        if not stalled:
+        if not stalled and not av_gap_abort:
             success = (process.returncode == 0)
 
     except Exception as e:
@@ -149,11 +229,13 @@ def doLiveRecording(live_url, output_file):
     hms = strftime("%H:%M:%S", gmtime(elapsed))
     message = "END@ %s (%s) -elapsed %s" % (nickname, langlive_id, hms)
     print(message)
-    return success, int(elapsed), stalled
+    return success, int(elapsed), stalled, av_gap_abort
 
 
 def hasAudioPacketsAtStart(output_file, window_seconds):
-    ffprobe_bin = os.path.join("./", current_path, "ffprobe")
+    ffprobe_bin = resolve_ffprobe_bin(current_path)
+    if not ffprobe_bin:
+        return True
     cmd = [
         ffprobe_bin,
         "-v", "error",
@@ -183,24 +265,61 @@ def validateRecordingFile(output_file, elapsed_seconds):
     if file_size < 1024 * 200:
         return False, "輸出檔案過小", {"has_video": False, "has_audio": False}
 
-    ffprobe_bin = os.path.join("./", current_path, "ffprobe")
-    cmd = [
-        ffprobe_bin,
-        "-v", "error",
-        "-show_streams",
-        "-of", "json",
-        output_file
-    ]
+    ffprobe_bin = resolve_ffprobe_bin(current_path)
+    ffmpeg_bin = os.path.join("./", current_path, "ffmpeg")
+    cmd = None
+    if ffprobe_bin:
+        cmd = [
+            ffprobe_bin,
+            "-v", "error",
+            "-show_streams",
+            "-of", "json",
+            output_file
+        ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
-        if result.returncode != 0:
-            return False, "ffprobe 檢查失敗", {"has_video": False, "has_audio": False}
+        streams = []
+        probe_method = "none"
+        probe_error = ""
+        video_duration = None
+        audio_duration = None
+        if cmd:
+            result = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=120)
+            if result.returncode != 0:
+                probe_error = (result.stderr or "ffprobe 檢查失敗").strip()[:200]
+            else:
+                probe_data = json.loads(result.stdout) if result.stdout else {}
+                streams = probe_data.get("streams", [])
+                probe_method = "ffprobe"
 
-        probe_data = json.loads(result.stdout) if result.stdout else {}
-        streams = probe_data.get("streams", [])
         has_video = any(s.get("codec_type") == "video" for s in streams)
         has_audio = any(s.get("codec_type") == "audio" for s in streams)
+
+        if not streams:
+            video_duration, audio_duration, probe_method, probe_error = probe_av_durations(
+                current_path, output_file, ffmpeg_bin=ffmpeg_bin, ffprobe_bin=ffprobe_bin
+            )
+            has_video = video_duration is not None
+            has_audio = audio_duration is not None
+        else:
+            video_duration, audio_duration, gap_method, gap_error = probe_av_durations(
+                current_path, output_file, ffmpeg_bin=ffmpeg_bin, ffprobe_bin=ffprobe_bin
+            )
+            if probe_error and gap_error:
+                probe_error = gap_error
+            if gap_method not in ("none", "ffprobe_partial"):
+                probe_method = gap_method
+            if video_duration is None or audio_duration is None:
+                for stream in streams:
+                    codec = stream.get("codec_type")
+                    duration = stream.get("duration")
+                    if codec == "video" and duration is not None:
+                        video_duration = float(duration)
+                    if codec == "audio" and duration is not None:
+                        audio_duration = float(duration)
+
+        if not has_video and not has_audio and probe_error:
+            return False, "ffprobe 檢查失敗", {"has_video": False, "has_audio": False}
 
         if has_audio and not has_video:
             return False, "有聲無畫", {"has_video": False, "has_audio": True}
@@ -217,8 +336,10 @@ def validateRecordingFile(output_file, elapsed_seconds):
         if not hasAudioPacketsAtStart(output_file, start_window):
             return False, "開頭無音訊（疑似開場異常）", {"has_video": True, "has_audio": True}
 
-        ok_gap, gap, video_duration, audio_duration = check_av_duration_gap(
-            streams, MAX_AV_DURATION_GAP_SECONDS
+        ok_gap, gap, video_duration, audio_duration = check_av_duration_gap_values(
+            video_duration,
+            audio_duration,
+            MAX_AV_DURATION_GAP_SECONDS,
         )
         stream_info = {
             "has_video": True,
@@ -427,7 +548,7 @@ if live_url != False and live_url != '':
     )
     try:
         while restart_count <= MAX_STALL_RESTARTS:
-            success, elapsed_seconds, stalled = doLiveRecording(live_url, current_output_file)
+            success, elapsed_seconds, stalled, av_gap_abort = doLiveRecording(live_url, current_output_file)
             total_elapsed += elapsed_seconds
 
             verify_success, verify_reason, stream_info = validateRecordingFile(current_output_file, elapsed_seconds)
@@ -436,9 +557,10 @@ if live_url != False and live_url != '':
                 break
 
             last_failure_category = classify_failure_reason(verify_reason, stalled=stalled)
+            should_restart = stalled or av_gap_abort
 
-            # 非卡住類型（如來源結束、輸出嚴重異常）不做循環重啟
-            if not stalled:
+            # 非卡住 / 聲畫異常類型（如來源結束）不做循環重啟
+            if not should_restart:
                 break
 
             restart_count += 1

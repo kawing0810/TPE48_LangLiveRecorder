@@ -1,7 +1,7 @@
 TPE48 LangLiveRecorder
 ======================================
 
-本文件最後更新：2026-06-10
+本文件最後更新：2026-06-24
 
 --------------------------------------
 專案定位
@@ -19,8 +19,8 @@ TPE48 LangLiveRecorder 用於監控 Lang Live 開播狀態，並透過 ffmpeg �
 --------------------------------------
 目前版本與追蹤方式
 --------------------------------------
-- 建議版本字串：4.5.2-alpha（開發線）
-- 建議 Git tag：v4.5.2-alpha
+- 建議版本字串：4.5.3-alpha（開發線）
+- 建議 Git tag：v4.5.3-alpha
 - 目前主要分支：alpha5-dev
 - 正式發版基底：master
 
@@ -34,7 +34,7 @@ TPE48 LangLiveRecorder 用於監控 Lang Live 開播狀態，並透過 ffmpeg �
 --------------------------------------
 - Windows（主要運行平台）
 - Python 3.9+（CI 使用 3.11）
-- ffmpeg / ffprobe（可放專案根目錄或加入 PATH）
+- ffmpeg / ffprobe（可放專案根目錄或加入 PATH；ffprobe 為錄影中 A/V 即時檢查所需）
 
 
 --------------------------------------
@@ -143,8 +143,14 @@ docs/release_train.md
 
 
 --------------------------------------
-近期版本重點（4.5.2-alpha）
+近期版本重點（4.5.3-alpha）
 --------------------------------------
+- 錄影中每 3 秒 ffprobe 檢查 A/V duration gap（超過 max_av_duration_gap_seconds 停段重啟）
+- 連續 probe 僅有 audio、無 video 時立即停段（audio_only_probe_fail_count，預設 1）
+- ffmpeg console 預設 loglevel error，隱藏 HLS 正常 EOF 警告；關閉 reconnect（與 m3u8 不相容）
+- stall 重啟、結束驗證、probe 後備邏輯集中於 recorder_core.py
+
+上一版（4.5.2-alpha）重點：
 - stall 重啟一律新檔名，避免 -y 覆寫同一檔造成時間軸錯亂（畫面加速/後段無聲）
 - 錄完驗證視訊/音訊 duration 差（max_av_duration_gap_seconds，預設 30 秒）
 - 預設 stall 偵測 15 秒、開場 grace 5 秒（config.json 可調）

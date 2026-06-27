@@ -3,10 +3,15 @@ import unittest
 from recorder_core import (
     build_ffmpeg_record_cmd,
     check_av_duration_gap,
+    check_av_duration_gap_values,
     classify_failure_reason,
     get_retry_delay_seconds,
     normalize_recorder_config,
+    is_audio_only_partial_probe,
+    next_audio_only_probe_streak,
     normalize_output_mode,
+    parse_timestamp_seconds,
+    probe_av_durations_ffprobe,
     should_rotate_segment,
 )
 
@@ -49,7 +54,15 @@ class RecorderCoreTests(unittest.TestCase):
         self.assertEqual(cfg["output_mode"], "copy")
 
         remux_cmd = build_ffmpeg_record_cmd("ffmpeg", "http://example/live.m3u8", "out.ts", "remux")
+        self.assertIn("-loglevel", remux_cmd)
+        self.assertIn("error", remux_cmd)
+        self.assertNotIn("-reconnect", remux_cmd)
         self.assertIn("+genpts+discardcorrupt", remux_cmd)
+
+        reconnect_cmd = build_ffmpeg_record_cmd(
+            "ffmpeg", "http://example/live.m3u8", "out.ts", "remux", ffmpeg_reconnect=True
+        )
+        self.assertIn("-reconnect", reconnect_cmd)
         self.assertIn("-map", remux_cmd)
         self.assertIn("0:v:0?", remux_cmd)
         self.assertIn("0:a:0?", remux_cmd)
@@ -78,6 +91,47 @@ class RecorderCoreTests(unittest.TestCase):
         )
         self.assertTrue(ok)
         self.assertAlmostEqual(gap, 10.0)
+
+    def test_parse_timestamp_seconds(self):
+        self.assertAlmostEqual(parse_timestamp_seconds("01:12:45.91"), 4365.91, places=1)
+        self.assertAlmostEqual(parse_timestamp_seconds("12:45.5"), 765.5)
+
+    def test_check_av_duration_gap_values(self):
+        ok, gap, _, _ = check_av_duration_gap_values(100.0, 200.0, 30)
+        self.assertFalse(ok)
+        self.assertAlmostEqual(gap, 100.0)
+        ok, gap, _, _ = check_av_duration_gap_values(None, 200.0, 30)
+        self.assertTrue(ok)
+        self.assertIsNone(gap)
+
+    def test_audio_only_probe_streak(self):
+        self.assertTrue(is_audio_only_partial_probe(None, 10.0))
+        self.assertFalse(is_audio_only_partial_probe(10.0, 10.0))
+        self.assertFalse(is_audio_only_partial_probe(None, 10.0, "ffprobe failed"))
+
+        streak = 0
+        streak = next_audio_only_probe_streak(streak, None, 10.0)
+        self.assertEqual(streak, 1)
+        streak = next_audio_only_probe_streak(streak, None, 12.0)
+        self.assertEqual(streak, 2)
+        self.assertGreaterEqual(
+            next_audio_only_probe_streak(0, None, 10.0),
+            1,
+        )
+        streak = next_audio_only_probe_streak(streak, 10.0, 12.0)
+        self.assertEqual(streak, 0)
+        streak = next_audio_only_probe_streak(1, None, None)
+        self.assertEqual(streak, 0)
+
+    def test_probe_av_durations_ffprobe_missing(self):
+        video_duration, audio_duration, method, error = probe_av_durations_ffprobe(
+            "E:/missing_dir_only",
+            "missing.ts",
+            ffprobe_bin=None,
+        )
+        self.assertIsNone(video_duration)
+        self.assertEqual(method, "none")
+        self.assertEqual(error, "ffprobe_missing")
 
 
 if __name__ == "__main__":

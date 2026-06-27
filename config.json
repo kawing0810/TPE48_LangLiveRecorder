@@ -9,7 +9,11 @@
     "backoff_base_seconds": 5,
     "backoff_max_seconds": 60,
     "output_mode": "remux",
-    "max_av_duration_gap_seconds": 30
+    "max_av_duration_gap_seconds": 30,
+    "av_check_interval_seconds": 3,
+    "audio_only_probe_fail_count": 1,
+    "ffmpeg_loglevel": "error",
+    "ffmpeg_reconnect": false
   },
   "alpha5_gate": {
     "days": 3,

@@ -1,6 +1,10 @@
 #!/usr/bin/python
 # coding=utf-8
 
+import json
+import os
+import re
+import subprocess
 from copy import deepcopy
 
 
@@ -15,9 +19,16 @@ DEFAULT_RECORDER_CONFIG = {
     "backoff_max_seconds": 60,
     "output_mode": "remux",
     "max_av_duration_gap_seconds": 30,
+    "av_check_interval_seconds": 3,
+    "audio_only_probe_fail_count": 1,
+    "ffmpeg_loglevel": "error",
+    "ffmpeg_reconnect": False,
 }
 
 OUTPUT_MODES = ("copy", "remux")
+FFMPEG_LOGLEVELS = (
+    "quiet", "panic", "fatal", "error", "warning", "info", "verbose", "debug", "trace",
+)
 FFMPEG_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; WOW64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/54.0.2840.99 Safari/537.36"
@@ -41,7 +52,7 @@ def normalize_recorder_config(raw_cfg):
     source = raw_cfg or {}
     output_mode = source.get("output_mode", cfg["output_mode"])
     for key, default in DEFAULT_RECORDER_CONFIG.items():
-        if key == "output_mode":
+        if key in ("output_mode", "ffmpeg_loglevel", "ffmpeg_reconnect"):
             continue
         cfg[key] = _to_int(source.get(key, default), default)
 
@@ -62,8 +73,40 @@ def normalize_recorder_config(raw_cfg):
         5,
         600,
     )
+    cfg["av_check_interval_seconds"] = clamp(
+        _to_int(source.get("av_check_interval_seconds", cfg["av_check_interval_seconds"]),
+                cfg["av_check_interval_seconds"]),
+        3,
+        1800,
+    )
+    cfg["audio_only_probe_fail_count"] = clamp(
+        _to_int(source.get("audio_only_probe_fail_count", cfg["audio_only_probe_fail_count"]),
+                cfg["audio_only_probe_fail_count"]),
+        1,
+        20,
+    )
     cfg["output_mode"] = normalize_output_mode(output_mode)
+    cfg["ffmpeg_loglevel"] = normalize_ffmpeg_loglevel(
+        source.get("ffmpeg_loglevel", cfg["ffmpeg_loglevel"])
+    )
+    cfg["ffmpeg_reconnect"] = normalize_ffmpeg_reconnect(
+        source.get("ffmpeg_reconnect", cfg["ffmpeg_reconnect"])
+    )
     return cfg
+
+
+def normalize_ffmpeg_loglevel(value):
+    level = str(value or "error").strip().lower()
+    if level not in FFMPEG_LOGLEVELS:
+        return "error"
+    return level
+
+
+def normalize_ffmpeg_reconnect(value):
+    if isinstance(value, bool):
+        return value
+    text = str(value or "true").strip().lower()
+    return text not in ("0", "false", "no", "off")
 
 
 def normalize_output_mode(value):
@@ -73,16 +116,33 @@ def normalize_output_mode(value):
     return mode
 
 
-def build_ffmpeg_record_cmd(ffmpeg_bin, live_url, output_file, output_mode="remux"):
+def build_ffmpeg_record_cmd(
+    ffmpeg_bin,
+    live_url,
+    output_file,
+    output_mode="remux",
+    ffmpeg_loglevel="error",
+    ffmpeg_reconnect=False,
+):
     mode = normalize_output_mode(output_mode)
+    loglevel = normalize_ffmpeg_loglevel(ffmpeg_loglevel)
     cmd = [ffmpeg_bin]
     if mode == "remux":
         cmd.extend(["-fflags", "+genpts+discardcorrupt"])
     cmd.extend([
         "-m3u8_hold_counters", "100",
         "-hide_banner",
-        "-loglevel", "warning",
+        "-loglevel", loglevel,
         "-stats",
+    ])
+    if normalize_ffmpeg_reconnect(ffmpeg_reconnect):
+        cmd.extend([
+            "-reconnect", "1",
+            "-reconnect_at_eof", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_delay_max", "5",
+        ])
+    cmd.extend([
         "-user_agent", FFMPEG_USER_AGENT,
         "-headers", FFMPEG_HEADERS,
         "-i", live_url,
@@ -160,7 +220,175 @@ def check_av_duration_gap(streams, max_gap_seconds=30):
             video_duration = duration
         elif codec == "audio":
             audio_duration = duration
+    return check_av_duration_gap_values(video_duration, audio_duration, max_gap_seconds)
+
+
+def check_av_duration_gap_values(video_duration, audio_duration, max_gap_seconds=30):
     if video_duration is None or audio_duration is None:
         return True, None, video_duration, audio_duration
-    gap = abs(video_duration - audio_duration)
+    gap = abs(float(video_duration) - float(audio_duration))
     return gap <= float(max_gap_seconds), gap, video_duration, audio_duration
+
+
+def is_audio_only_partial_probe(video_duration, audio_duration, probe_error=""):
+    if probe_error:
+        return False
+    return audio_duration is not None and video_duration is None
+
+
+def next_audio_only_probe_streak(streak, video_duration, audio_duration, probe_error=""):
+    if is_audio_only_partial_probe(video_duration, audio_duration, probe_error):
+        return streak + 1
+    return 0
+
+
+def resolve_ffprobe_bin(base_path):
+    candidates = [
+        os.path.join(base_path, "ffprobe"),
+        os.path.join(base_path, "ffprobe.exe"),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def resolve_ffmpeg_bin(base_path):
+    candidates = [
+        os.path.join(base_path, "ffmpeg"),
+        os.path.join(base_path, "ffmpeg.exe"),
+    ]
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def parse_timestamp_seconds(value):
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        if ":" not in text:
+            seconds = float(text)
+            return seconds if seconds >= 0 else None
+        parts = text.split(":")
+        parts = [float(p) for p in parts]
+        if len(parts) == 3:
+            return parts[0] * 3600 + parts[1] * 60 + parts[2]
+        if len(parts) == 2:
+            return parts[0] * 60 + parts[1]
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def probe_stream_duration_via_ffmpeg(ffmpeg_bin, output_file, map_spec, timeout_seconds=600):
+    if not ffmpeg_bin or not os.path.exists(output_file):
+        return None
+    cmd = [
+        ffmpeg_bin,
+        "-hide_banner",
+        "-i", output_file,
+        "-map", map_spec,
+        "-c", "copy",
+        "-f", "null",
+        "-",
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    times = re.findall(r"time=\s*([\d:.]+)", result.stderr or "")
+    if not times:
+        return None
+    return parse_timestamp_seconds(times[-1])
+
+
+def probe_av_durations(base_path, output_file, ffmpeg_bin=None, ffprobe_bin=None):
+    ffmpeg_bin = ffmpeg_bin or resolve_ffmpeg_bin(base_path)
+    ffprobe_bin = ffprobe_bin or resolve_ffprobe_bin(base_path)
+    method = "none"
+    error = ""
+
+    if ffprobe_bin:
+        cmd = [
+            ffprobe_bin,
+            "-v", "error",
+            "-show_streams",
+            "-of", "json",
+            output_file,
+        ]
+        try:
+            result = subprocess.run(cmd, capture_output=True, text=True, errors="replace", check=False, timeout=120)
+            if result.returncode == 0 and result.stdout:
+                streams = json.loads(result.stdout).get("streams", [])
+                ok, gap, video_duration, audio_duration = check_av_duration_gap(streams, 30)
+                if video_duration is not None and audio_duration is not None:
+                    return video_duration, audio_duration, "ffprobe", ""
+                method = "ffprobe_partial"
+            else:
+                error = (result.stderr or "ffprobe failed").strip()[:200]
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
+            error = str(exc)
+
+    if ffmpeg_bin:
+        video_duration = probe_stream_duration_via_ffmpeg(ffmpeg_bin, output_file, "0:v:0")
+        audio_duration = probe_stream_duration_via_ffmpeg(ffmpeg_bin, output_file, "0:a:0")
+        if video_duration is not None and audio_duration is not None:
+            return video_duration, audio_duration, "ffmpeg_decode", error
+        if not error:
+            error = "ffmpeg decode probe missing stream durations"
+
+    return None, None, method, error
+
+
+def probe_av_durations_ffprobe(base_path, output_file, ffprobe_bin=None, timeout_seconds=8):
+    """Fast in-recording probe; requires ffprobe (typically one TS segment interval)."""
+    ffprobe_bin = ffprobe_bin or resolve_ffprobe_bin(base_path)
+    if not ffprobe_bin:
+        return None, None, "none", "ffprobe_missing"
+    if not os.path.exists(output_file):
+        return None, None, "none", "file_missing"
+    cmd = [
+        ffprobe_bin,
+        "-v", "error",
+        "-show_entries", "stream=codec_type,duration",
+        "-of", "json",
+        output_file,
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            check=False,
+            timeout=timeout_seconds,
+        )
+        if result.returncode != 0:
+            return None, None, "ffprobe", (result.stderr or "ffprobe failed").strip()[:200]
+        streams = json.loads(result.stdout or "{}").get("streams", [])
+        video_duration = None
+        audio_duration = None
+        for stream in streams:
+            codec = stream.get("codec_type")
+            duration = stream_duration_seconds(stream)
+            if duration is None:
+                continue
+            if codec == "video":
+                video_duration = duration
+            elif codec == "audio":
+                audio_duration = duration
+        if video_duration is None or audio_duration is None:
+            return video_duration, audio_duration, "ffprobe_partial", ""
+        return video_duration, audio_duration, "ffprobe", ""
+    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError) as exc:
+        return None, None, "ffprobe", str(exc)
